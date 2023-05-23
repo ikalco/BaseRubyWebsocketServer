@@ -1,111 +1,228 @@
-require 'socket' # Provides TCPServer and TCPSocket classes
+require 'socket'
 require 'digest/sha1'
-require './http_server.rb'
 
-def sendMessage (socket, msg)
-  #STDERR.puts "Sending message : #{ msg.inspect }"
+module Listenable
+    def listeners() @listeners ||= [] end
 
-  output = [0b10000001, msg.size, msg]
+	def on(event_name, &block)
+		listeners << [event_name, block]
+	end
 
-  socket.write output.pack("CCA#{ msg.size }")
+    def emit(event_name, *args)
+		listeners.each do |listener|
+			if (listener[0] == event_name)
+				Thread.new { listener[1].call(*args) }
+			end
+		end
+	end
 end
 
-def recvMessage (socket)
-  first_byte = socket.getbyte
+class WebSocket
+    include Listenable
 
-  if first_byte == nil then return end
-  fin = first_byte & 0b10000000
-  opcode = first_byte & 0b00001111
+	attr_reader :sock_domain, :remote_port, :remote_hostname, :ip
 
-  if (opcode == 8) then return socket.close() end
+	module Status
+		CONNECTING = 0
+		OPEN = 1
+		CLOSING = 2
+		CLOSED = 3
+	end
 
-  #STDERR.puts "First Byte: 0b#{ first_byte.inspect }"
-  #STDERR.puts "Fin: 0b#{ fin.to_s(2) }"
-  #STDERR.puts "Opcode: #{ opcode }"
+	def initialize(raw_socket)
+		@raw_socket = raw_socket
+		@sock_domain, @remote_port, @remote_hostname, @ip = raw_socket.peeraddr
 
-  #raise "We don't support continuations" unless fin
-  if (opcode == 1)
-    #raise "We only support opcode 1 and 8" unless opcode == 1 || opcode == 8
+		@status = Status::CONNECTING
+		self.handshake()
+	end
 
-    second_byte = socket.getbyte
-    is_masked = second_byte & 0b10000000
-    payload_size = second_byte & 0b01111111
+	def handshake()
+		# Read the HTTP request. We know it's finished when we see a line with nothing but \r\n
+		http_request = ''
+		while (line = @raw_socket.gets()) && (line != "\r\n")
+			http_request += line
+		end
 
-    #puts payload_size
+		# Grab the security key from the headers. If one isn't present, close the connection.
+		if matches = http_request.match(/^Sec-WebSocket-Key: (\S+)/)
+			websocket_key = matches[1]
+		else
+			self.close("Aborting non-websocket connection!")
+			return
+		end
 
-    #raise "All incoming frames should be masked according to the websocket spec" unless is_masked
-    raise "We only support payloads < 126 bytes in length" unless payload_size < 126
+		response_key = Digest::SHA1.base64digest([websocket_key, '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'].join)
 
-    #STDERR.puts "Payload size: #{ payload_size } bytes"
+		response = "HTTP/1.1 101 Switching Protocols\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Accept: #{response_key}\r\n\r\n"
 
-    mask = 4.times.map { socket.getbyte }
-    #STDERR.puts "Got mask: #{ mask.inspect }"
+		@raw_socket.write(response)
 
-    data = payload_size.times.map { socket.getbyte }
-    #STDERR.puts "Got masked data: #{ data.inspect }"
+		if (!@raw_socket.closed?)
+			@status = Status::OPEN
+		else
+			self.close("Connection Failed!")
+		end
+	end
 
-    unmasked_data = data.each_with_index.map { |byte, i| byte ^ mask[i % 4] }
-    #STDERR.puts "Unmasked the data: #{ unmasked_data.inspect }"
+	def recvheader()
+		first_byte = @raw_socket.getbyte()
+		second_byte =  @raw_socket.getbyte()
+		return if first_byte == nil || second_byte == nil
 
-    plainMsg = unmasked_data.pack('C*').force_encoding('utf-8')
+		fin = (first_byte & 0b10000000) >> 7
+		opcode = first_byte & 0b00001111
+		is_masked = (second_byte & 0b10000000) >> 7
 
-    #STDERR.puts "Recieve Message: #{ plainMsg.inspect }"
+		payload_length = second_byte & 0b01111111
+		if payload_length == 126 # next 2 bytes are payload_length
+			payload_length = 2.times.map { @raw_socket.getbyte }
+		elsif payload_length == 127 # next 4 bytes are payload_length
+			payload_length = 4.times.map { @raw_socket.getbyte }
+		end
 
-    return plainMsg
-    #raise "We only support opcode 1 and 8"
-  end
+		data = nil
+
+		if (is_masked == 1)
+			mask_key = 4.times.map {  @raw_socket.getbyte() }
+			maksed_data = payload_length.times.map {  @raw_socket.getbyte() }
+			data = maksed_data.each_with_index.map { |byte, i| byte ^ mask_key[i % 4] }
+		else
+			self.close("Unmasked frame from client to server!")
+		end
+
+		return fin, opcode, is_masked, payload_length, data
+	end
+
+	def recv()
+		return self.close() if self.closed?
+
+		fin, opcode, is_maksed, payload_length, data = self.recvheader()
+		return if data == nil
+
+		# we don't support fragmentation
+		return if fin == 0 || opcode == 0
+
+		case opcode
+		when 1
+			# text frame
+			msg = data.pack('C*').force_encoding('utf-8')
+			self.emit("message_text", msg)
+		when 2
+			# binary frame
+			msg = data
+			self.emit("message_binary", msg)
+		when 8
+			# close frame
+			self.close("Control frame can't be fragmented") if (fin != 1)
+			self.close("Control frame can't have payload length greater than 125") if (payload_length > 125)
+
+			if (@status == Status::OPEN && payload_length > 0)
+				status_code = data.pack("n")
+				msg = data.drop(2).pack('C*').force_encoding('utf-8')
+
+				self.close("Closing with Status Code of #{status_code}:\r\n#{msg}")
+			else
+				self.close()
+			end
+		when 9
+			# ping frame
+			self.close("Control frame can't be fragmented") if (fin != 1)
+			self.close("Control frame can't have payload length greater than 125") if (payload_length > 125)
+
+			# send pong frame
+			if (@status == Status::OPEN)
+				self.send(1, 9, 0, data)
+			end
+		when 10
+			# pong frame
+			self.close("Control frame can't be fragmented") if (fin != 1)
+			self.close("Control frame can't have payload length greater than 125") if (payload_length > 125)
+
+			# we don't care about pong frames, so do nothing
+		else
+			self.close("Unsupported Opcode!")
+		end
+	end
+
+	def send_text(data)
+		self.send(1, 1, 0, data)
+	end
+
+	def send_binary(data)
+		self.send(1, 2, 0, data)
+	end
+
+	def send(fin, opcode, mask, data = [])
+		return self.close() if self.closed?
+		return if (fin == 0 || opcode == 0 || mask == 1 || @status != Status::OPEN)
+
+		data = data.kind_of?(Array) ? data : data.codepoints()
+		payload_length = data.size
+
+		first_byte = fin << 7 | opcode
+
+		if (payload_length < 0x7E)
+			second_byte = mask << 7 | payload_length
+			output = [first_byte, second_byte].concat(data)
+			output = output.pack("CCC#{payload_length}")
+		elsif (payloadLength <= 0xFFFF)
+			secondByte = mask << 7 | 0x7E
+			output = [first_byte, second_byte, payload_length].concat(data)
+			output = output.pack("CCnC#{payload_length}")
+		elsif payloadLength <= 0x7FFFFFFFFFFFFFFF
+			secondByte = mask << 7 | 0x7F
+			output = [first_byte, second_byte, payload_length, data]
+			output = output.pack("CCNC#{payload_length}")
+		end
+
+		@raw_socket.write(output)
+	end
+
+	def closed?
+		return @raw_socket.closed? || @status == Status::CLOSING || @status == Status::CLOSED
+	end
+
+	def close(reason = "")
+		return if self.closed?
+
+		if (!@raw_socket.closed?)
+			# send close websocket frame
+			self.send(1, 8, 0)
+			@raw_socket.close()
+
+			@status = Status::CLOSING
+		end
+
+		self.emit("close", reason)
+		@status = Status::CLOSED
+	end
 end
 
-def websocketHandshake (socket)
-  # Read the HTTP request. We know it's finished when we see a line with nothing but \r\n
-  http_request = ""
-  while (line = socket.gets) && (line != "\r\n")
-    http_request += line
-  end
+class WebSocketServer
+    include Listenable
 
+	def initialize(port)
+		@server = TCPServer.new('0.0.0.0', port)
+		# self.start()
+	end
 
-  # Grab the security key from the headers. If one isn't present, close the connection.
-  if matches = http_request.match(/^Sec-WebSocket-Key: (\S+)/)
-    websocket_key = matches[1]
-    STDERR.puts "Websocket handshake detected with key: #{ websocket_key }"
-  else
-    STDERR.puts "Aborting non-websocket connection"
-    socket.close
-    return
-  end
+	def start()
+		while !@server.closed? do
+			Thread.start(@server.accept) do |raw_socket|
+			socket = WebSocket.new(raw_socket)
+				self.emit("connection", socket)
 
+				while !socket.closed? do
+					socket.recv()
+				end
 
-  response_key = Digest::SHA1.base64digest([websocket_key, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"].join)
-  #STDERR.puts "Responding to handshake with key: #{ response_key }"
+				socket.close()
+			end
+		end
+	end
 
-  socket.write <<-eos
-HTTP/1.1 101 Switching Protocols
-Upgrade: websocket
-Connection: Upgrade
-Sec-WebSocket-Accept: #{ response_key }
-
-  eos
-
-  STDERR.puts "Handshake completed."
+	def start_nonblocking()
+		Thread.new { self.start() }
+	end
 end
-
-webSocketServer = TCPServer.new 2345
-
-loop do
-
-  # websocket loop  
-  Thread.start(webSocketServer.accept) do |socket|
-
-    websocketHandshake socket
-
-    sendMessage(socket, "Hello World!")
-
-    while (true)
-      msg = recvMessage socket
-    end
-
-    socket.close()
-  end
-end
-
-webSocketServer.close
