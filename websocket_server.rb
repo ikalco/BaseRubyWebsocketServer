@@ -11,6 +11,14 @@ module Listenable
     def emit(event_name, *args)
 		listeners.each do |listener|
 			if (listener[0] == event_name)
+				listener[1].call(*args)
+			end
+		end
+	end
+
+	def emit_thread(event_name, *args)
+		listeners.each do |listener|
+			if (listener[0] == event_name)
 				Thread.new { listener[1].call(*args) }
 			end
 		end
@@ -186,16 +194,19 @@ class WebSocket
 	def close(reason = "")
 		return if self.closed?
 
-		if (!@raw_socket.closed?)
-			# send close websocket frame
-			self.send(1, 8, 0)
-			@raw_socket.close()
-
+		Thread.new {
 			@status = Status::CLOSING
-		end
+			self.emit("close", reason)
 
-		self.emit("close", reason)
-		@status = Status::CLOSED
+			if (!@raw_socket.closed?)
+				# send close websocket frame
+
+				self.send(1, 8, 0)
+				@raw_socket.close()
+			end
+
+			@status = Status::CLOSED
+		}
 	end
 end
 
@@ -204,25 +215,46 @@ class WebSocketServer
 
 	def initialize(port)
 		@server = TCPServer.new('0.0.0.0', port)
-		# self.start()
+		@clients = []
+	end
+
+	def ensure_one_connection(socket)
+		other_socket = @clients.find { |other_socket| socket.ip == other_socket.ip }
+		if (other_socket != nil)
+			other_socket.close()
+		end
+		@clients.push(socket)
 	end
 
 	def start()
 		while !@server.closed? do
 			Thread.start(@server.accept) do |raw_socket|
-			socket = WebSocket.new(raw_socket)
-				self.emit("connection", socket)
+				socket = WebSocket.new(raw_socket)
 
-				while !socket.closed? do
-					socket.recv()
+				self.ensure_one_connection(socket)
+
+				recv_thread = Thread.new {
+					Thread.stop()
+
+					while !socket.closed? do
+						socket.recv()
+					end
+				}
+				sleep(0.1) while recv_thread.status != "sleep"
+
+				socket.on("close") do
+					recv_thread.exit()
 				end
 
-				socket.close()
+				self.emit_thread("connection", socket)
+
+				recv_thread.run()
+				recv_thread.join()
 			end
 		end
 	end
 
 	def start_nonblocking()
-		Thread.new { self.start() }
+		return Thread.new { self.start() }
 	end
 end
