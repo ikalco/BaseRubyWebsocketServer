@@ -52,15 +52,13 @@ class WebSocket
             Timeout.timeout(5) do
                 # Read the HTTP request. We know it's finished when we see a line with nothing but \r\n
                 while (line = @raw_socket.gets()) && (line != "\r\n")
-                    http_request += line
+                    http_request += line.chomp + "\n"
                 end
             end
         rescue Timeout::Error
             self.close("HTTP Request timeout (5s)")
             return
         end
-
-        http_request = http_request.lines.map(&:chomp).join("\n")
 
         # validate request, but only HTTP version, we accept all uris
         matches = http_request.lines[0].match(/^GET (?<uri>\/.*) HTTP\/(?<version>\d\.\d)$/)
