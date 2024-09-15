@@ -1,4 +1,5 @@
 require 'socket'
+require 'timeout'
 require 'digest/sha1'
 
 module Listenable
@@ -46,21 +47,63 @@ class WebSocket
     end
 
     def handshake()
-        # Read the HTTP request. We know it's finished when we see a line with nothing but \r\n
         http_request = ''
-        while (line = @raw_socket.gets()) && (line != "\r\n")
-            http_request += line
-        end
-
-        # Grab the security key from the headers. If one isn't present, close the connection.
-        if matches = http_request.match(/^Sec-WebSocket-Key: (\S+)/)
-            websocket_key = matches[1]
-        else
-            self.close("Aborting non-websocket connection!")
+        begin
+            Timeout.timeout(5) do
+                # Read the HTTP request. We know it's finished when we see a line with nothing but \r\n
+                while (line = @raw_socket.gets()) && (line != "\r\n")
+                    http_request += line
+                end
+            end
+        rescue Timeout::Error
+            self.close("HTTP Request timeout (5s)")
             return
         end
 
-        response_key = Digest::SHA1.base64digest([websocket_key, '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'].join)
+        http_request = http_request.lines.map(&:chomp).join("\n")
+
+        # validate request, but only HTTP version, we accept all uris
+        matches = http_request.lines[0].match(/^GET (?<uri>\/.*) HTTP\/(?<version>\d\.\d)$/)
+        if !matches || matches[:version].to_f < 1.1
+            self.close("HTTP Version must be at least 1.1")
+            return
+        end
+
+        # we don't really care what, it just must exist
+        matches = http_request.match(/^Host:\s+(?<host>[^:]*)(:(?<port>[1-9]*))?$/)
+        if !matches || matches[:host] == ""
+            self.close("HTTP Request didn't have a Host header")
+            return
+        end
+
+        # request must have Upgrade header with websocket in it
+        matches = http_request.match(/^Upgrade:\s+(?<upgrades>.*)$/)
+        if !matches || !matches[:upgrades].include?("websocket")
+            self.close("HTTP Request didn't have websocket Upgrade header")
+            return
+        end
+
+        # request must have Connection header with Upgrade in it
+        matches = http_request.match(/^Connection:\s+(?<connections>.*)$/)
+        if !matches || !matches[:connections].include?("Upgrade")
+            self.close("HTTP Request didn't have Connection header set to Upgrade")
+            return
+        end
+
+        # websocket version must be 13
+        matches = http_request.match(/^Sec-WebSocket-Version:\s+(?<version>[1-9]+)$/)
+        if !matches || matches[:version].to_i != 13
+            self.close("HTTP Request websocket version wasn't 13")
+        end
+
+        # Grab the security key from the headers. If one isn't present, close the connection.
+        matches = http_request.match(/^Sec-WebSocket-Key:\s+(?<key>.*)$/)
+        if !matches || matches[:key] == ""
+            self.close("HTTP Request didn't have websocket key")
+            return
+        end
+
+        response_key = Digest::SHA1.base64digest([matches[:key], '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'].join)
 
         response = "HTTP/1.1 101 Switching Protocols\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Accept: #{response_key}\r\n\r\n"
 
