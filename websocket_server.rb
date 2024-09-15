@@ -237,6 +237,14 @@ class WebSocket
     def close(reason = "")
         return if self.closed?
 
+        # close while connecting means the connection failed so send 404
+        if @status == Status::CONNECTING
+            @raw_socket.write("HTTP/1.1 404\r\n\r\n")
+            @raw_socket.close()
+            @status = Status::CLOSED
+            return
+        end
+
         Thread.new {
             @status = Status::CLOSING
             self.emit("close", reason)
