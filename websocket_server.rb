@@ -31,7 +31,7 @@ end
 class WebSocket
     include Listenable
 
-    attr_reader :sock_domain, :remote_port, :remote_hostname, :ip, :status
+    attr_reader :sock_domain, :remote_port, :remote_hostname, :ip, :status, :ping_recv
 
     module Status
         CONNECTING = 0
@@ -45,6 +45,7 @@ class WebSocket
         @sock_domain, @remote_port, @remote_hostname, @ip = raw_socket.peeraddr
 
         @status = Status::CONNECTING
+        @ping_recv = false
         self.handshake()
     end
 
@@ -90,7 +91,6 @@ class WebSocket
         response_key = Digest::SHA1.base64digest([matches[:key], '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'].join)
 
         response = "HTTP/1.1 101 Switching Protocols\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Accept: #{response_key}\r\n\r\n"
-
 
         begin
             @raw_socket.write(response)
@@ -164,8 +164,7 @@ class WebSocket
             return self.send_close(1002, "Control frame can't be fragmented") if (fin != 1)
             return self.send_close(1002, "Control frame can't have payload length greater than 125") if (payload_length > 125)
 
-            # send pong frame
-            self.send(1, 9, 0, data)
+            @ping_recv = true
         when 10
             # pong frame
             return self.send_close(1002, "Control frame can't be fragmented") if (fin != 1)
@@ -183,6 +182,15 @@ class WebSocket
 
     def send_binary(data)
         self.send(1, 2, 0, data)
+    end
+
+    def send_ping()
+        self.send(1, 9, 0)
+    end
+
+    def send_pong()
+        self.send(1, 10, 0)
+        @ping_recv = false
     end
 
     def send_close(status_code, reason = "")
@@ -282,6 +290,7 @@ class WebSocketServer
         while !@server.closed? do
             @clients.each do |client|
                 client.close() if client.status != WebSocket::Status::OPEN
+                client.send_pong() if client.ping_recv
             end
             @clients = @clients.reject { |c| c.closed? }
             readable, _, _ = IO.select([@server, *@clients], nil, nil, 1)
