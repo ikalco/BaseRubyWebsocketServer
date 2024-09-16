@@ -18,11 +18,13 @@ module Listenable
     end
 
     def emit_thread(event_name, *args)
-        listeners.each do |listener|
-            if (listener[0] == event_name)
-                Thread.new { listener[1].call(*args) }
+        Thread.new {
+            listeners.each do |listener|
+                if (listener[0] == event_name)
+                    listener[1].call(*args)
+                end
             end
-        end
+        }
     end
 end
 
@@ -139,11 +141,11 @@ class WebSocket
         when 1
             # text frame
             msg = data.pack('C*').force_encoding('utf-8')
-            self.emit("message_text", msg)
+            self.emit_thread("message_text", msg)
         when 2
             # binary frame
             msg = data
-            self.emit("message_binary", msg)
+            self.emit_thread("message_binary", msg)
         when 8
             # close frame
             return self.send_close("Control frame can't be fragmented") if (fin != 1)
