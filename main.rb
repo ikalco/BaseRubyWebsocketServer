@@ -13,9 +13,12 @@ wss.on("connection") do |web_socket|
         puts msg
     end
 
-    web_socket.on("close") do |reason|
-        puts "Disconnected from #{web_socket.ip} for #{reason}"
+    web_socket.on("close") do
+        puts "Disconnected from #{web_socket.ip}"
     end
+
+    web_socket.send_text("hello")
+    web_socket.send_close()
 end
 
 wss.start()
