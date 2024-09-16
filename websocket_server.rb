@@ -31,7 +31,7 @@ end
 class WebSocket
     include Listenable
 
-    attr_reader :sock_domain, :remote_port, :remote_hostname, :ip, :status, :ping_recv
+    attr_reader :sock_domain, :remote_port, :remote_hostname, :ip, :status, :ping_recv, :ping_sent, :last_active
 
     module Status
         CONNECTING = 0
@@ -137,6 +137,8 @@ class WebSocket
         # we don't support fragmentation
         return if fin == 0 || opcode == 0
 
+        @last_active = Time.now
+
         case opcode
         when 1
             # text frame
@@ -170,7 +172,7 @@ class WebSocket
             return self.send_close(1002, "Control frame can't be fragmented") if (fin != 1)
             return self.send_close(1002, "Control frame can't have payload length greater than 125") if (payload_length > 125)
 
-            # we don't care about pong frames, so do nothing
+            @ping_sent = false
         else
             return self.send_close(1002, "Unsupported Opcode!")
         end
@@ -186,6 +188,7 @@ class WebSocket
 
     def send_ping()
         self.send(1, 9, 0)
+        @ping_sent = true
     end
 
     def send_pong()
@@ -288,9 +291,18 @@ class WebSocketServer
 
     def start()
         while !@server.closed? do
+            now = Time.now
             @clients.each do |client|
-                client.close() if client.status != WebSocket::Status::OPEN
                 client.send_pong() if client.ping_recv
+                if now - client.last_active > 5
+                    if (client.ping_sent)
+                        client.send_close()
+                    else
+                        client.send_ping()
+                    end
+                end
+
+                client.close() if client.status != WebSocket::Status::OPEN
             end
             @clients = @clients.reject { |c| c.closed? }
             readable, _, _ = IO.select([@server, *@clients], nil, nil, 1)
