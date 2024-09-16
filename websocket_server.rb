@@ -119,7 +119,7 @@ class WebSocket
 
         data = nil
 
-        return self.send_close("Unmasked frame from client to server!") if is_masked == 0
+        return self.send_close(1002, "Unmasked frame from client to server!") if is_masked == 0
 
         mask_key = 4.times.map {  @raw_socket.getbyte() }
         maksed_data = payload_length.times.map {  @raw_socket.getbyte() }
@@ -148,32 +148,32 @@ class WebSocket
             self.emit_thread("message_binary", msg)
         when 8
             # close frame
-            return self.send_close("Control frame can't be fragmented") if (fin != 1)
-            return self.send_close("Control frame can't have payload length greater than 125") if (payload_length > 125)
+            return self.send_close(1002, "Control frame can't be fragmented") if (fin != 1)
+            return self.send_close(1002, "Control frame can't have payload length greater than 125") if (payload_length > 125)
 
             if (@status == Status::OPEN && payload_length > 0)
-                status_code = data.pack("n")
+                status_code = data.pack("n").unpack("n")[0]
                 msg = data.drop(2).pack('C*').force_encoding('utf-8')
 
-                self.send_close("Closing with Status Code of #{status_code}:\r\n#{msg}")
+                self.send_close(status_code, msg)
             else
-                self.send_close()
+                self.send_close(1005)
             end
         when 9
             # ping frame
-            return self.send_close("Control frame can't be fragmented") if (fin != 1)
-            return self.send_close("Control frame can't have payload length greater than 125") if (payload_length > 125)
+            return self.send_close(1002, "Control frame can't be fragmented") if (fin != 1)
+            return self.send_close(1002, "Control frame can't have payload length greater than 125") if (payload_length > 125)
 
             # send pong frame
             self.send(1, 9, 0, data)
         when 10
             # pong frame
-            return self.send_close("Control frame can't be fragmented") if (fin != 1)
-            return self.send_close("Control frame can't have payload length greater than 125") if (payload_length > 125)
+            return self.send_close(1002, "Control frame can't be fragmented") if (fin != 1)
+            return self.send_close(1002, "Control frame can't have payload length greater than 125") if (payload_length > 125)
 
             # we don't care about pong frames, so do nothing
         else
-            return self.send_close("Unsupported Opcode!")
+            return self.send_close(1002, "Unsupported Opcode!")
         end
     end
 
@@ -185,12 +185,14 @@ class WebSocket
         self.send(1, 2, 0, data)
     end
 
-    def send_close(reason = "")
+    def send_close(status_code, reason = "")
         return if self.closed?
 
-        reason = reason.slice(0, 125)
+        reason = reason.slice(0, 125).codepoints
+        output = [status_code].concat(reason)
+        output = output.pack("nC#{reason.size}")
 
-        self.send(1, 8, 0, reason)
+        self.send(1, 8, 0, output)
         @status = Status::CLOSING
     end
 
@@ -273,7 +275,7 @@ class WebSocketServer
 
     def ensure_one_connection(socket)
         other_socket = @clients.find { |other_socket| socket.ip == other_socket.ip }
-        other_socket.send_close() if other_socket
+        other_socket.send_close(1008) if other_socket
     end
 
     def start()
