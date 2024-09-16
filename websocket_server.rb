@@ -99,6 +99,7 @@ class WebSocket
         end
 
         @status = Status::OPEN
+        @last_active = Time.now
     end
 
     def recvheader()
@@ -294,9 +295,9 @@ class WebSocketServer
             now = Time.now
             @clients.each do |client|
                 client.send_pong() if client.ping_recv
-                if now - client.last_active > 5
+                if now - client.last_active > 30
                     if (client.ping_sent)
-                        client.send_close()
+                        client.send_close(1002)
                     else
                         client.send_ping()
                     end
