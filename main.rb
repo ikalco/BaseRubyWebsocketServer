@@ -18,7 +18,7 @@ wss.on("connection") do |web_socket|
     end
 
     web_socket.send_text("hello")
-    web_socket.send_close()
+    web_socket.send_close(1000)
 end
 
 wss.start()

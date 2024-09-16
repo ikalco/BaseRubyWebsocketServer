@@ -122,8 +122,8 @@ class WebSocket
         return self.send_close(1002, "Unmasked frame from client to server!") if is_masked == 0
 
         mask_key = 4.times.map {  @raw_socket.getbyte() }
-        maksed_data = payload_length.times.map {  @raw_socket.getbyte() }
-        data = maksed_data.each_with_index.map { |byte, i| byte ^ mask_key[i % 4] }
+        masked_data = payload_length.times.map {  @raw_socket.getbyte() }
+        data = masked_data.each_with_index.map { |byte, i| byte ^ mask_key[i % 4] }
 
         return fin, opcode, is_masked, payload_length, data
     end
@@ -205,17 +205,17 @@ class WebSocket
 
         first_byte = fin << 7 | opcode
 
-        if (payload_length < 0x7E)
+        if payload_length < 0x7E
             second_byte = mask << 7 | payload_length
             output = [first_byte, second_byte].concat(data)
             output = output.pack("CCC#{payload_length}")
-        elsif (payloadLength <= 0xFFFF)
-            secondByte = mask << 7 | 0x7E
+        elsif payload_length <= 0xFFFF
+            second_byte = mask << 7 | 0x7E
             output = [first_byte, second_byte, payload_length].concat(data)
             output = output.pack("CCnC#{payload_length}")
-        elsif payloadLength <= 0x7FFFFFFFFFFFFFFF
-            secondByte = mask << 7 | 0x7F
-            output = [first_byte, second_byte, payload_length, data]
+        elsif payload_length <= 0x7FFFFFFFFFFFFFFF
+            second_byte = mask << 7 | 0x7F
+            output = [first_byte, second_byte, payload_length].concat(data)
             output = output.pack("CCNC#{payload_length}")
         end
 
@@ -293,6 +293,7 @@ class WebSocketServer
                     next if websocket.status != WebSocket::Status::OPEN
                     self.ensure_one_connection(websocket)
                     @clients.push(websocket)
+                    sleep(0.1)
                     self.emit_thread("connection", websocket)
                     next
                 end
