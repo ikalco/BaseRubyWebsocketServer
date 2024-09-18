@@ -290,6 +290,18 @@ class WebSocketServer
         other_socket.send_close(1008) if other_socket
     end
 
+    def broadcast_text(data)
+        @clients.each do |client|
+            client.send_text(data)
+        end
+    end
+
+    def broadcast_binary(data)
+        @clients.each do |client|
+            client.send_binary(data)
+        end
+    end
+
     def start()
         while !@server.closed? do
             now = Time.now
